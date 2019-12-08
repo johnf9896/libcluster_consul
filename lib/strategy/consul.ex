@@ -23,16 +23,21 @@ defmodule ClusterConsul.Strategy do
     root = Keyword.get(state.config, :root, "http://localhost:8500")
     _check = Keyword.fetch(state.config, :check)
 
-    info(state.topology, "Registering/updating consul service: #{name}")
-    register(root, name, port)
-    update_check(root, name, :passing, "Erlang node (#{node()}) is running")
+    if Keyword.get(state.config, :register, false) do
+      info(state.topology, "Registering/updating consul service: #{name}")
+      register(root, name, port)
+      update_check(root, name, :passing, "Erlang node (#{node()}) is running")
+    end
 
     {:ok, state, 0}
   end
 
   @impl GenServer
   def handle_info(:timeout, state) do
-    handle_info(:update_check, state)
+    if Keyword.get(state.config, :register, false) do
+      handle_info(:update_check, state)
+    end
+
     handle_info(:load, state)
   end
 
@@ -48,11 +53,17 @@ defmodule ClusterConsul.Strategy do
     name = Keyword.fetch!(state.config, :service_name)
     root = Keyword.get(state.config, :root, "http://localhost:8500")
 
+    app_name =
+      Keyword.get_lazy(state.config, :application_name, fn ->
+        [n, _] = node() |> to_string() |> String.split("@")
+        n
+      end)
+
     new_nodelist =
       case get_nodes(root, name) do
         {:ok, node_info} ->
           node_info
-          |> Enum.map(&ip_to_node(&1["Node"]["Address"]))
+          |> Enum.map(&format_node(&1, app_name))
           |> MapSet.new()
 
         {:error, reason} ->
@@ -110,10 +121,12 @@ defmodule ClusterConsul.Strategy do
 
   @impl GenServer
   def terminate(reason, state) do
-    name = Keyword.fetch!(state.config, :service_name)
-    root = Keyword.get(state.config, :root, "http://localhost:8500")
-    output = "Terminated with reason: #{inspect(reason)}"
-    update_check(root, name, :critical, output)
+    if Keyword.get(state.config, :register, false) do
+      name = Keyword.fetch!(state.config, :service_name)
+      root = Keyword.get(state.config, :root, "http://localhost:8500")
+      output = "Terminated with reason: #{inspect(reason)}"
+      update_check(root, name, :critical, output)
+    end
   end
 
   def register(root, name, port) do
@@ -164,8 +177,7 @@ defmodule ClusterConsul.Strategy do
     "#{root}/v1#{path}"
   end
 
-  def ip_to_node(ip) do
-    [n, _] = node() |> to_string() |> String.split("@")
-    :"#{n}@#{ip}"
+  defp format_node(node_info, app_name) do
+    :"#{app_name}@#{node_info["Node"]["Address"]}"
   end
 end
